@@ -1,591 +1,679 @@
-# -*- coding: utf8 -*-
-"""GNUmed Praxis related middleware."""
+"""GNUmed praxis related widgets.
+
+Praxis:
+
+	Each database belongs to ONE praxis only. A praxis can
+	have several branches. A praxis is at the same level
+	as an organization, except that it is not explicitely
+	defined. Rather, that ONE organization of which at least
+	one unit is defined as a praxis branch IS the praxis.
+
+Praxis branch
+
+	Branches are the sites/locations of a praxis. There
+	can be several branches. Each branch must link to
+	units of ONE AND THE SAME organization (because
+	it is not considered good data protection practice
+	to mix charts of *different* organizations within
+	one database). However, that organization which
+	has units that are praxis branches can also have
+	other units which are not branches :-)
+
+copyright: authors
+"""
 #============================================================
-__license__ = "GPL"
-__author__ = "K.Hilbert <Karsten.Hilbert@gmx.net>"
+__author__ = "K.Hilbert"
+__license__ = "GPL v2 or later (details at http://www.gnu.org)"
 
-
-import sys
 import logging
-import io
-import urllib.parse
+import sys
+#import datetime as pydt
+
+
+import wx
 
 
 if __name__ == '__main__':
 	sys.path.insert(0, '../../')
-from Gnumed.pycommon import gmPG2
+from Gnumed.pycommon import gmCfg
+from Gnumed.pycommon import gmDispatcher
 from Gnumed.pycommon import gmTools
-from Gnumed.pycommon import gmBorg
-from Gnumed.pycommon import gmCfg2
-from Gnumed.pycommon import gmHooks
-from Gnumed.pycommon import gmBusinessDBObject
+from Gnumed.pycommon import gmPG2
+from Gnumed.pycommon import gmMatchProvider
 
+from Gnumed.business import gmPraxis
+from Gnumed.business import gmStaff
 from Gnumed.business import gmOrganization
+
+from Gnumed.wxpython import gmOrganizationWidgets
+from Gnumed.wxpython import gmGuiHelpers
+from Gnumed.wxpython import gmAuthWidgets
+from Gnumed.wxpython import gmListWidgets
+from Gnumed.wxpython import gmPlugin
+from Gnumed.wxpython import gmCfgWidgets
+from Gnumed.wxpython import gmPhraseWheel
 
 
 _log = logging.getLogger('gm.praxis')
-_cfg = gmCfg2.gmCfgData()
 
-#============================================================
-def delete_workplace(workplace=None, delete_config=False, conn=None):
+#=========================================================================
+def show_audit_trail(parent=None):
 
-	args = {'wp': workplace}
+	if parent is None:
+		parent = wx.GetApp().GetTopWindow()
 
-	# delete workplace itself (plugin load list, that is)
-	queries = [
-		{'cmd': """
-delete from cfg.cfg_item
-where
-	fk_template = (
-		select pk
-		from cfg.cfg_template
-		where name = 'horstspace.notebook.plugin_load_order'
-	)
-		and
-	workplace = %(wp)s""",
-		'args': args
-		}
-	]
-
-	# delete other config items associated with this workplace
-	if delete_config:
-		queries.append ({
-			'cmd': """
-delete from cfg.cfg_item
-where
-	workplace = %(wp)s""",
-			'args': args
-		})
-
-	gmPG2.run_rw_queries(link_obj = conn, queries = queries, end_tx = True)
-
-#============================================================
-# short description
-#------------------------------------------------------------
-_SQL_get_praxis_branches = "SELECT * FROM dem.v_praxis_branches WHERE %s"
-
-class cPraxisBranch(gmBusinessDBObject.cBusinessDBObject):
-	"""Represents a praxis branch"""
-
-	_cmd_fetch_payload = _SQL_get_praxis_branches % "pk_praxis_branch = %s"
-	_cmds_store_payload = [
-		"""UPDATE dem.praxis_branch SET
-				fk_org_unit = %(pk_org_unit)s
-			WHERE
-				pk = %(pk_praxis_branch)s
-					AND
-				xmin = %(xmin_praxis_branch)s
-			RETURNING
-				xmin as xmin_praxis_branch
-		"""
-	]
-	_updatable_fields = [
-		'pk_org_unit'
-	]
-	#--------------------------------------------------------
-	def format(self):
-		txt = _('Praxis branch                   #%s\n') % self._payload[self._idx['pk_praxis_branch']]
-		txt += ' '
-		txt += '\n '.join(self.org_unit.format(with_address = True, with_org = True, with_comms = True))
-		return txt
-
-	#--------------------------------------------------------
-	def lock(self, exclusive=False):
-		return lock_praxis_branch(pk_praxis_branch = self._payload[self._idx['pk_praxis_branch']], exclusive = exclusive)
-
-	#--------------------------------------------------------
-	def unlock(self, exclusive=False):
-		return unlock_praxis_branch(pk_praxis_branch = self._payload[self._idx['pk_praxis_branch']], exclusive = exclusive)
-
-	#--------------------------------------------------------
-	def get_comm_channels(self, comm_medium=None):
-		return self.org_unit.get_comm_channels(comm_medium = comm_medium)
-
-	#--------------------------------------------------------
-	def get_external_ids(self, id_type=None, issuer=None):
-		return self.org_unit.get_external_ids(id_type = id_type, issuer = issuer)
-
-	#--------------------------------------------------------
-	def get_distance2address_url(self, address):
-		self_adr = self.address
-		url = 'https://www.luftlinie.org/%s-%s-%s-%s-%s/%s-%s-%s-%s-%s' % (
-			urllib.parse.quote(self_adr['street'].encode('utf8')),
-			urllib.parse.quote(self_adr['number'].encode('utf8')),
-			urllib.parse.quote(self_adr['urb'].encode('utf8')),
-			urllib.parse.quote(self_adr['postcode'].encode('utf8')),
-			urllib.parse.quote(self_adr['country'].encode('utf8')),
-			urllib.parse.quote(address['street'].encode('utf8')),
-			urllib.parse.quote(address['number'].encode('utf8')),
-			urllib.parse.quote(address['urb'].encode('utf8')),
-			urllib.parse.quote(address['postcode'].encode('utf8')),
-			urllib.parse.quote(address['country'].encode('utf8'))
-		)
-		return url
-
-	#--------------------------------------------------------
-	# properties
-	#--------------------------------------------------------
-	def _get_org_unit(self):
-		return gmOrganization.cOrgUnit(aPK_obj = self._payload[self._idx['pk_org_unit']])
-
-	org_unit = property(_get_org_unit, lambda x:x)
-
-	#--------------------------------------------------------
-	def _get_org(self):
-		return gmOrganization.cOrg(aPK_obj = self._payload[self._idx['pk_org']])
-
-	organization = property(_get_org, lambda x:x)
-
-	#--------------------------------------------------------
-	def _get_address(self):
-		return self.org_unit.address
-
-	address = property(_get_address, lambda x:x)
-
-#	def _set_address(self, address):
-#		self['pk_address'] = address['pk_address']
-#		self.save()
-#	address = property(_get_address, _set_address)
-
-	#--------------------------------------------------------
-	def _get_vcf(self):
-		vcf_fields = [
-			'BEGIN:VCARD',
-			'VERSION:4.0',
-			'KIND:org',
-			'ORG:%(l10n_organization_category)s %(praxis)s;%(l10n_unit_category)s %(branch)s' % self,
-			_('FN:%(l10n_unit_category)s %(branch)s of %(l10n_organization_category)s %(praxis)s') % self,
-			'N:%(praxis)s;%(branch)s' % self
-		]
-		adr = self.address
-		if adr is not None:
-			vcf_fields.append('ADR:;%(subunit)s;%(street)s %(number)s;%(urb)s;%(l10n_region)s;%(postcode)s;%(l10n_country)s' % adr)
-		comms = self.get_comm_channels(comm_medium = 'workphone')
-		if len(comms) > 0:
-			vcf_fields.append('TEL;VALUE=uri;TYPE=work:tel:%(url)s' % comms[0])
-		comms = self.get_comm_channels(comm_medium = 'email')
-		if len(comms) > 0:
-			vcf_fields.append('EMAIL:%(url)s' % comms[0])
-		vcf_fields.append('END:VCARD')
-		vcf_fname = gmTools.get_unique_filename (
-			prefix = 'gm-praxis-',
-			suffix = '.vcf'
-		)
-		vcf_file = io.open(vcf_fname, mode = 'wt', encoding = 'utf8')
-		vcf_file.write('\n'.join(vcf_fields))
-		vcf_file.write('\n')
-		vcf_file.close()
-		return vcf_fname
-
-	vcf = property(_get_vcf, lambda x:x)
-
-	#--------------------------------------------------------
-	def export_as_mecard(self, filename=None):
-		if filename is None:
-			filename = gmTools.get_unique_filename (
-				prefix = 'gm-praxis-',
-				suffix = '.mcf'
-			)
-		with io.open(filename, mode = 'wt', encoding = 'utf8') as mecard_file:
-			mecard_file.write(self.MECARD)
-		return filename
-
-	#--------------------------------------------------------
-	def _get_mecard(self):
-		"""
-		http://blog.thenetimpact.com/2011/07/decoding-qr-codes-how-to-format-data-for-qr-code-generators/
-		https://www.nttdocomo.co.jp/english/service/developer/make/content/barcode/function/application/addressbook/index.html
-
-		MECARD:N:NAME;ADR:pobox,subunit,unit,street,ort,region,zip,country;TEL:111111111;FAX:22222222;EMAIL:mail@praxis.org;
-
-		MECARD:N:$<praxis::%(praxis)s, %(branch)s::>$;ADR:$<praxis_address::,%(subunit)s,%(number)s,%(street)s,%(urb)s,,%(postcode)s,%(l10n_country)s::>$;TEL:$<praxis_comm::workphone::>$;FAX:$<praxis_comm::fax::>$;EMAIL:$<praxis_comm::email::60>$;
-		"""
-		MECARD = 'MECARD:N:%(praxis)s,%(branch)s;' % self
-		adr = self.address
-		if adr is not None:
-			MECARD += 'ADR:,%(subunit)s,%(number)s,%(street)s,%(urb)s,,%(postcode)s,%(l10n_country)s;' % adr
-		comms = self.get_comm_channels(comm_medium = 'workphone')
-		if len(comms) > 0:
-			MECARD += 'TEL:%(url)s;' % comms[0]
-		comms = self.get_comm_channels(comm_medium = 'fax')
-		if len(comms) > 0:
-			MECARD += 'FAX:%(url)s;' % comms[0]
-		comms = self.get_comm_channels(comm_medium = 'email')
-		if len(comms) > 0:
-			MECARD += 'EMAIL:%(url)s;' % comms[0]
-		return MECARD
-
-	MECARD = property(_get_mecard)
-
-	#--------------------------------------------------------
-	def _get_scan2pay_data(self):
-		IBANs = self.get_external_ids(id_type = 'IBAN', issuer = 'Bank')
-		if len(IBANs) == 0:
-			_log.debug('no IBAN found, cannot create scan2pay data')
-			return None
-		data = {
-			'IBAN': IBANs[0]['value'][:34],
-			'beneficiary': self['praxis'][:70]
-		}
-		BICs = self.get_external_ids(id_type = 'BIC', issuer = 'Bank')
-		if len(BICs) == 0:
-			data['BIC'] = ''
-		else:
-			data['BIC'] = BICs[0]['value'][:11]
-		return 'BCD\n002\n1\nSCT\n%(BIC)s\n%(beneficiary)s\n%(IBAN)s' % data
-
-	scan2pay_data = property(_get_scan2pay_data)
-
-#------------------------------------------------------------
-def lock_praxis_branch(pk_praxis_branch=None, exclusive=False):
-	return gmPG2.lock_row(table = 'dem.praxis_branch', pk = pk_praxis_branch, exclusive = exclusive)
-
-#------------------------------------------------------------
-def unlock_praxis_branch(pk_praxis_branch=None, exclusive=False):
-	return gmPG2.unlock_row(table = 'dem.praxis_branch', pk = pk_praxis_branch, exclusive = exclusive)
-
-#------------------------------------------------------------
-def get_praxis_branches(order_by=None, return_pks=False):
-	if order_by is None:
-		order_by = 'true'
-	else:
-		order_by = 'true ORDER BY %s' % order_by
-
-	cmd = _SQL_get_praxis_branches % order_by
-	rows, idx = gmPG2.run_ro_queries(queries = [{'cmd': cmd}], get_col_idx = True)
-	if return_pks:
-		return [ r['pk_praxis_branch'] for r in rows ]
-	return [ cPraxisBranch(row = {'data': r, 'idx': idx, 'pk_field': 'pk_praxis_branch'}) for r in rows ]
-
-#------------------------------------------------------------
-def get_praxis_branch_by_org_unit(pk_org_unit=None):
-	cmd = _SQL_get_praxis_branches % 'pk_org_unit = %(pk_ou)s'
-	args = {'pk_ou': pk_org_unit}
-	rows, idx = gmPG2.run_ro_queries(queries = [{'cmd': cmd, 'args': args}], get_col_idx = True)
-	if len(rows) == 0:
-		return None
-	return cPraxisBranch(row = {'data': rows[0], 'idx': idx, 'pk_field': 'pk_praxis_branch'})
-
-#------------------------------------------------------------
-def create_praxis_branch(pk_org_unit=None):
-
-	args = {'fk_unit': pk_org_unit}
-	cmd1 = """
-		INSERT INTO dem.praxis_branch (fk_org_unit)
-		SELECT %(fk_unit)s WHERE NOT EXISTS (
-			SELECT 1 FROM dem.praxis_branch WHERE fk_org_unit = %(fk_unit)s
-		)
-	"""
-	cmd2 = """SELECT * from dem.v_praxis_branches WHERE pk_org_unit = %(fk_unit)s"""
-	queries = [
-		{'cmd': cmd1, 'args': args},
-		{'cmd': cmd2, 'args': args}
-	]
-	rows, idx = gmPG2.run_rw_queries(queries = queries, return_data = True, get_col_idx = True)
-	return cPraxisBranch(row = {'data': rows[0], 'idx': idx, 'pk_field': 'pk_praxis_branch'})
-
-#------------------------------------------------------------
-def create_praxis_branches(pk_org_units=None):
-	queries = []
-	for pk in pk_org_units:
-		args = {'fk_unit': pk}
-		cmd = """
-			INSERT INTO dem.praxis_branch (fk_org_unit)
-			SELECT %(fk_unit)s WHERE NOT EXISTS (
-				SELECT 1 FROM dem.praxis_branch WHERE fk_org_unit = %(fk_unit)s
-			)
-		"""
-		queries.append({'cmd': cmd, 'args': args})
-
-	args = {'fk_units': tuple(pk_org_units)}
-	cmd = """SELECT * from dem.v_praxis_branches WHERE pk_org_unit IN %(fk_units)s"""
-	queries.append({'cmd': cmd, 'args': args})
-	rows, idx = gmPG2.run_rw_queries(queries = queries, return_data = True, get_col_idx = True)
-	return [ cPraxisBranch(row = {'data': r, 'idx': idx, 'pk_field': 'pk_praxis_branch'}) for r in rows ]
-
-#------------------------------------------------------------
-def delete_praxis_branch(pk_praxis_branch=None):
-	if not lock_praxis_branch(pk_praxis_branch = pk_praxis_branch, exclusive = True):
+	conn = gmAuthWidgets.get_dbowner_connection(procedure = _('showing audit trail'))
+	if conn is None:
 		return False
-	args = {'pk': pk_praxis_branch}
-	cmd = "DELETE FROM dem.praxis_branch WHERE pk = %(pk)s"
-	gmPG2.run_rw_queries(queries = [{'cmd': cmd, 'args': args}])
-	unlock_praxis_branch(pk_praxis_branch = pk_praxis_branch, exclusive = True)
-	return True
 
+	#-----------------------------------
+	def refresh(lctrl):
+		cmd = 'SELECT * FROM audit.v_audit_trail ORDER BY audit_when_ts'
+		rows, idx = gmPG2.run_ro_queries(link_obj = conn, queries = [{'cmd': cmd}], get_col_idx = False)
+		lctrl.set_string_items (
+			[ [
+				r['event_when'],
+				r['event_by'],
+				'%s %s %s' % (
+					gmTools.coalesce(r['row_version_before'], gmTools.u_diameter),
+					gmTools.u_arrow2right,
+					gmTools.coalesce(r['row_version_after'], gmTools.u_diameter)
+				),
+				r['event_table'],
+				r['event'],
+				r['pk_audit']
+			] for r in rows ]
+		)
+	#-----------------------------------
+	gmListWidgets.get_choices_from_list (
+		parent = parent,
+		msg = '',
+		caption = _('GNUmed database audit log ...'),
+		columns = [ _('When'), _('Who'), _('Revisions'), _('Table'), _('Event'), '#' ],
+		single_selection = True,
+		refresh_callback = refresh
+	)
+
+#============================================================
+def configure_fallback_primary_provider(parent=None):
+
+	if parent is None:
+		parent = wx.GetApp().GetTopWindow()
+
+	staff = gmStaff.get_staff_list()
+	choices = [ [
+			s['short_alias'],
+			'%s%s %s' % (
+				gmTools.coalesce(s['title'], '', '%s '),
+				s['firstnames'],
+				s['lastnames']
+			),
+			s['l10n_role'],
+			gmTools.coalesce(s['comment'], '')
+		]
+		for s in staff
+		if s['is_active'] is True
+	]
+	data = [ s['pk_staff'] for s in staff if s['is_active'] is True ]
+
+	gmCfgWidgets.configure_string_from_list_option (
+		parent = parent,
+		message = _(
+			'\n'
+			'Please select the provider to fall back to in case\n'
+			'no primary provider is configured for a patient.\n'
+		),
+		option = 'patient.fallback_primary_provider',
+		bias = 'user',
+		default_value = None,
+		choices = choices,
+		columns = [_('Alias'), _('Provider'), _('Role'), _('Comment')],
+		data = data,
+		caption = _('Configuring fallback primary provider')
+	)
+
+#============================================================
+# workplace plugin configuration widgets
 #------------------------------------------------------------
-def delete_praxis_branches(pk_praxis_branches=None, except_pk_praxis_branches=None):
+def configure_workplace_plugins(parent=None):
 
-	if pk_praxis_branches is None:
-		cmd = 'SELECT pk from dem.praxis_branch'
-		rows, idx = gmPG2.run_ro_queries(queries = [{'cmd': cmd}], get_col_idx = False)
-		pks_to_lock = [ r[0] for r in rows ]
-	else:
-		pks_to_lock = pk_praxis_branches[:]
+	if parent is None:
+		parent = wx.GetApp().GetTopWindow()
 
-	if except_pk_praxis_branches is not None:
-		for pk in except_pk_praxis_branches:
-			try: pks_to_lock.remove(pk)
-			except ValueError: pass
+	#-----------------------------------
+	def delete(workplace):
 
-	for pk in pks_to_lock:
-		if not lock_praxis_branch(pk_praxis_branch = pk, exclusive = True):
+		curr_workplace = gmPraxis.gmCurrentPraxisBranch().active_workplace
+		if workplace == curr_workplace:
+			gmDispatcher.send(signal = 'statustext', msg = _('Cannot delete the active workplace.'), beep = True)
 			return False
 
-	args = {}
-	where_parts = []
-
-	if pk_praxis_branches is not None:
-		args['pks'] = tuple(pk_praxis_branches)
-		where_parts.append('pk IN %(pks)s')
-
-	if except_pk_praxis_branches is not None:
-		args['except'] = tuple(except_pk_praxis_branches)
-		where_parts.append('pk NOT IN %(except)s')
-
-	if len(where_parts) == 0:
-		cmd = "DELETE FROM dem.praxis_branch"
-	else:
-		cmd = "DELETE FROM dem.praxis_branch WHERE %s" % ' AND '.join(where_parts)
-
-	gmPG2.run_rw_queries(queries = [{'cmd': cmd, 'args': args}])
-	for pk in pks_to_lock:
-		unlock_praxis_branch(pk_praxis_branch = pk, exclusive = True)
-	return True
-
-#============================================================
-class gmCurrentPraxisBranch(gmBorg.cBorg):
-
-	def __init__(self, branch=None):
-		try:
-			self.has_been_initialized
-		except AttributeError:
-			self.branch = None
-			self.has_been_initialized = True
-			self.__helpdesk = None
-			self.__active_workplace = None
-
-		# user wants copy of current branch
-		if branch is None:
-			return None
-
-		# must be cPraxisBranch instance, then
-		if not isinstance(branch, cPraxisBranch):
-			_log.error('cannot set current praxis branch to [%s], must be a cPraxisBranch instance' % str(branch))
-			raise TypeError('gmPraxis.gmCurrentPraxisBranch.__init__(): <branch> must be a cPraxisBranch instance but is: %s' % str(branch))
-
-		if self.branch is not None:
-			self.branch.unlock()
-
-		branch.lock()
-		self.branch = branch
-		_log.debug('current praxis branch now: %s', self.branch)
-
-		return None
-
-	#--------------------------------------------------------
-	# __getattr__ handling
-	#--------------------------------------------------------
-	def __getattr__(self, attribute):
-		if attribute == 'has_been_initialized':
-			raise AttributeError
-		if attribute in ['branch', 'waiting_list_patients', 'help_desk', 'db_logon_banner', 'active_workplace', 'workplaces', 'user_email']:
-			return getattr(self, attribute)
-		return getattr(self.branch, attribute)
-
-	#--------------------------------------------------------
-	# __get/setitem__ handling
-	#--------------------------------------------------------
-	def __getitem__(self, attribute = None):
-		"""Return any attribute if known how to retrieve it by proxy."""
-		return self.branch[attribute]
-
-	#--------------------------------------------------------
-	def __setitem__(self, attribute, value):
-		self.branch[attribute] = value
-
-	#--------------------------------------------------------
-	# waiting list handling
-	#--------------------------------------------------------
-	def remove_from_waiting_list(self, pk=None):
-		cmd = 'DELETE FROM clin.waiting_list WHERE pk = %(pk)s'
-		args = {'pk': pk}
-		gmPG2.run_rw_queries(queries = [{'cmd': cmd, 'args': args}])
-		gmHooks.run_hook_script(hook = 'after_waiting_list_modified')
-
-	#--------------------------------------------------------
-	def update_in_waiting_list(self, pk = None, urgency = 0, comment = None, zone = None):
-		cmd = """
-update clin.waiting_list
-set
-	urgency = %(urg)s,
-	comment = %(cmt)s,
-	area = %(zone)s
-where
-	pk = %(pk)s"""
-		args = {
-			'pk': pk,
-			'urg': urgency,
-			'cmt': gmTools.none_if(comment, ''),
-			'zone': gmTools.none_if(zone, '')
-		}
-
-		gmPG2.run_rw_queries(queries = [{'cmd': cmd, 'args': args}])
-		gmHooks.run_hook_script(hook = 'after_waiting_list_modified')
-
-	#--------------------------------------------------------
-	def raise_in_waiting_list(self, current_position=None):
-		if current_position == 1:
-			return
-
-		cmd = 'select clin.move_waiting_list_entry(%(pos)s, (%(pos)s - 1))'
-		args = {'pos': current_position}
-
-		gmPG2.run_rw_queries(queries = [{'cmd': cmd, 'args': args}])
-
-	#--------------------------------------------------------
-	def lower_in_waiting_list(self, current_position=None):
-		cmd = 'select clin.move_waiting_list_entry(%(pos)s, (%(pos)s+1))'
-		args = {'pos': current_position}
-
-		gmPG2.run_rw_queries(queries = [{'cmd': cmd, 'args': args}])
-
-	#--------------------------------------------------------
-	# properties
-	#--------------------------------------------------------
-	def _get_waiting_list_patients(self):
-		cmd = """
-			SELECT * FROM clin.v_waiting_list
-			ORDER BY
-				list_position
-		"""
-		rows, idx = gmPG2.run_ro_queries (
-			queries = [{'cmd': cmd}],
-			get_col_idx = False
-		)
-		return rows
-
-	waiting_list_patients = property (_get_waiting_list_patients, lambda x:x)
-
-	#--------------------------------------------------------
-	def _set_helpdesk(self, helpdesk):
-		return
-
-	def _get_helpdesk(self):
-
-		if self.__helpdesk is not None:
-			return self.__helpdesk
-
-		self.__helpdesk = gmTools.coalesce (
-			_cfg.get (
-				group = 'workplace',
-				option = 'help desk',
-				source_order = [
-					('explicit', 'return'),
-					('workbase', 'return'),
-					('local', 'return'),
-					('user', 'return'),
-					('system', 'return')
-				]
+		dlg = gmGuiHelpers.c2ButtonQuestionDlg (
+			parent,
+			-1,
+			caption = _('Deleting workplace ...'),
+			question = _('Are you sure you want to delete this workplace ?\n\n "%s"\n') % workplace,
+			show_checkbox = True,
+			checkbox_msg = _('delete configuration, too'),
+			checkbox_tooltip = _(
+				'Check this if you want to delete all configuration items\n'
+				'for this workplace along with the workplace itself.'
 			),
-			'http://wiki.gnumed.de'
-		)
-
-		return self.__helpdesk
-
-	helpdesk = property(_get_helpdesk, _set_helpdesk)
-
-	#--------------------------------------------------------
-	def _get_db_logon_banner(self):
-		rows, idx = gmPG2.run_ro_queries(queries = [{'cmd': 'select _(message) from cfg.db_logon_banner'}])
-		if len(rows) == 0:
-			return ''
-		return gmTools.coalesce(rows[0][0], '').strip()
-
-	def _set_db_logon_banner(self, banner):
-		queries = [
-			{'cmd': 'delete from cfg.db_logon_banner'}
-		]
-		if banner.strip() != '':
-			queries.append ({
-				'cmd': 'insert into cfg.db_logon_banner (message) values (%(msg)s)',
-				'args': {'msg': banner.strip()}
-			})
-		rows, idx = gmPG2.run_rw_queries(queries = queries, end_tx = True)
-
-	db_logon_banner = property(_get_db_logon_banner, _set_db_logon_banner)
-
-	#--------------------------------------------------------
-	def _set_workplace(self, workplace):
-		# maybe later allow switching workplaces on the fly
-		return True
-
-	def _get_workplace(self):
-		"""Return the current workplace (client profile) definition.
-
-		The first occurrence counts.
-		"""
-		if self.__active_workplace is not None:
-			return self.__active_workplace
-
-		self.__active_workplace = gmTools.coalesce (
-			_cfg.get (
-				group = 'workplace',
-				option = 'name',
-				source_order = [
-					('explicit', 'return'),
-					('workbase', 'return'),
-					('local', 'return'),
-					('user', 'return'),
-					('system', 'return'),
-				]
-			),
-			'Local Default'
-		)
-
-		return self.__active_workplace
-
-	active_workplace = property(_get_workplace, _set_workplace)
-
-	#--------------------------------------------------------
-	def _set_workplaces(self, val):
-		pass
-
-	def _get_workplaces(self):
-		rows, idx = gmPG2.run_ro_queries(queries = [{'cmd': 'SELECT DISTINCT workplace FROM cfg.cfg_item ORDER BY workplace'}])
-		return [ r[0] for r in rows ]
-
-	workplaces = property(_get_workplaces, _set_workplaces)
-
-	#--------------------------------------------------------
-	def _get_user_email(self):
-		# FIXME: get this from the current users staff record in the database
-		return _cfg.get (
-			group = 'preferences',
-			option = 'user email',
-			source_order = [
-				('explicit', 'return'),
-				('user', 'return'),
-				('local', 'return'),
-				('workbase', 'return'),
-				('system', 'return')
+			button_defs = [
+				{'label': _('Delete'), 'tooltip': _('Yes, delete this workplace.'), 'default': True},
+				{'label': _('Do NOT delete'), 'tooltip': _('No, do NOT delete this workplace'), 'default': False}
 			]
 		)
 
-	def _set_user_email(self, val):
-		prefs_file = _cfg.get(option = 'user_preferences_file')
-		gmCfg2.set_option_in_INI_file (
-			filename = prefs_file,
-			group = 'preferences',
-			option = 'user email',
-			value = val
-		)
-		_cfg.reload_file_source(file = prefs_file)
+		decision = dlg.ShowModal()
+		if decision != wx.ID_YES:
+			dlg.DestroyLater()
+			return False
 
-	user_email = property(_get_user_email, _set_user_email)
+		include_cfg = dlg.checkbox_is_checked()
+		dlg.DestroyLater()
+
+		dbo_conn = gmAuthWidgets.get_dbowner_connection(procedure = _('delete workplace'))
+		if not dbo_conn:
+			return False
+
+		gmPraxis.delete_workplace(workplace = workplace, conn = dbo_conn, delete_config = include_cfg)
+		return True
+	#-----------------------------------
+	def edit(workplace=None):
+
+		dbcfg = gmCfg.cCfgSQL()
+
+		if workplace is None:
+			dlg = wx.TextEntryDialog (
+				parent,
+				_('Enter a descriptive name for the new workplace:'),
+				caption = _('Configuring GNUmed workplaces ...'),
+				value = '',
+				style = wx.OK | wx.CENTRE
+			)
+			dlg.ShowModal()
+			workplace = dlg.GetValue().strip()
+			if workplace == '':
+				gmGuiHelpers.gm_show_error(_('Cannot save a new workplace without a name.'), _('Configuring GNUmed workplaces ...'))
+				return False
+			curr_plugins = []
+		else:
+			curr_plugins = gmTools.coalesce(dbcfg.get2 (
+				option = 'horstspace.notebook.plugin_load_order',
+				workplace = workplace,
+				bias = 'workplace'
+				), []
+			)
+
+		msg = _(
+			'Pick the plugin(s) to be loaded the next time the client is restarted under the workplace:\n'
+			'\n'
+			'    [%s]\n'
+		) % workplace
+
+		picker = gmListWidgets.cItemPickerDlg (
+			parent,
+			-1,
+			title = _('Configuring workplace plugins ...'),
+			msg = msg
+		)
+		picker.set_columns(['Available plugins'], ['Active plugins'])
+		available_plugins = gmPlugin.get_installed_plugins(plugin_dir = 'gui')
+		picker.set_choices(available_plugins)
+		picker.set_picks(picks = curr_plugins[:])
+		btn_pressed = picker.ShowModal()
+		if btn_pressed != wx.ID_OK:
+			picker.DestroyLater()
+			return False
+
+		new_plugins = picker.get_picks()
+		picker.DestroyLater()
+		if new_plugins == curr_plugins:
+			return True
+
+		if new_plugins is None:
+			return True
+
+		dbcfg.set (
+			option = 'horstspace.notebook.plugin_load_order',
+			value = new_plugins,
+			workplace = workplace
+		)
+
+		return True
+	#-----------------------------------
+	def edit_old(workplace=None):
+
+		available_plugins = gmPlugin.get_installed_plugins(plugin_dir='gui')
+
+		dbcfg = gmCfg.cCfgSQL()
+
+		if workplace is None:
+			dlg = wx.TextEntryDialog (
+				parent,
+				_('Enter a descriptive name for the new workplace:'),
+				caption = _('Configuring GNUmed workplaces ...'),
+				value = '',
+				style = wx.OK | wx.CENTRE
+			)
+			dlg.ShowModal()
+			workplace = dlg.GetValue().strip()
+			if workplace == '':
+				gmGuiHelpers.gm_show_error(_('Cannot save a new workplace without a name.'), _('Configuring GNUmed workplaces ...'))
+				return False
+			curr_plugins = []
+			choices = available_plugins
+		else:
+			curr_plugins = gmTools.coalesce(dbcfg.get2 (
+				option = 'horstspace.notebook.plugin_load_order',
+				workplace = workplace,
+				bias = 'workplace'
+				), []
+			)
+			choices = curr_plugins[:]
+			for p in available_plugins:
+				if p not in choices:
+					choices.append(p)
+
+		sels = range(len(curr_plugins))
+		new_plugins = gmListWidgets.get_choices_from_list (
+			parent = parent,
+			msg = _(
+				'\n'
+				'Select the plugin(s) to be loaded the next time\n'
+				'the client is restarted under the workplace:\n'
+				'\n'
+				' [%s]'
+				'\n'
+			) % workplace,
+			caption = _('Configuring GNUmed workplaces ...'),
+			choices = choices,
+			selections = sels,
+			columns = [_('Plugins')],
+			single_selection = False
+		)
+
+		if new_plugins == curr_plugins:
+			return True
+
+		if new_plugins is None:
+			return True
+
+		dbcfg.set (
+			option = 'horstspace.notebook.plugin_load_order',
+			value = new_plugins,
+			workplace = workplace
+		)
+
+		return True
+	#-----------------------------------
+	def clone(workplace=None):
+		if workplace is None:
+			return False
+
+		new_name = wx.GetTextFromUser (
+			message = _('Enter a name for the new workplace !'),
+			caption = _('Cloning workplace'),
+			default_value = '%s-2' % workplace,
+			parent = parent
+		).strip()
+
+		if new_name == '':
+			return False
+
+		dbcfg = gmCfg.cCfgSQL()
+		opt = 'horstspace.notebook.plugin_load_order'
+
+		plugins = dbcfg.get2 (
+			option = opt,
+			workplace = workplace,
+			bias = 'workplace'
+		)
+
+		dbcfg.set (
+			option = opt,
+			value = plugins,
+			workplace = new_name
+		)
+
+		# FIXME: clone cfg, too
+
+		return True
+	#-----------------------------------
+	def refresh(lctrl):
+		workplaces = gmPraxis.gmCurrentPraxisBranch().workplaces
+		curr_workplace = gmPraxis.gmCurrentPraxisBranch().active_workplace
+		try:
+			sels = [workplaces.index(curr_workplace)]
+		except ValueError:
+			sels = []
+
+		lctrl.set_string_items(workplaces)
+		lctrl.set_selections(selections = sels)
+	#-----------------------------------
+	gmListWidgets.get_choices_from_list (
+		parent = parent,
+		msg = _(
+			'\nSelect the workplace to configure below.\n'
+			'\n'
+			'The currently active workplace is preselected.\n'
+		),
+		caption = _('Configuring GNUmed workplaces ...'),
+		columns = [_('Workplace')],
+		single_selection = True,
+		refresh_callback = refresh,
+		edit_callback = edit,
+		new_callback = edit,
+		delete_callback = delete,
+		left_extra_button = (_('Clone'), _('Clone the selected workplace'), clone)
+	)
 
 #============================================================
-if __name__ == '__main__':
+from Gnumed.wxGladeWidgets import wxgGreetingEditorDlg
+
+class cGreetingEditorDlg(wxgGreetingEditorDlg.wxgGreetingEditorDlg):
+
+	def __init__(self, *args, **kwargs):
+		wxgGreetingEditorDlg.wxgGreetingEditorDlg.__init__(self, *args, **kwargs)
+
+		self.praxis = gmPraxis.gmCurrentPraxisBranch()
+		self._TCTRL_message.SetValue(self.praxis.db_logon_banner)
+	#--------------------------------------------------------
+	# event handlers
+	#--------------------------------------------------------
+	def _on_save_button_pressed(self, evt):
+		self.praxis.db_logon_banner = self._TCTRL_message.GetValue().strip()
+		if self.IsModal():
+			self.EndModal(wx.ID_SAVE)
+		else:
+			self.Close()
+
+#============================================================
+def select_praxis_branch(parent=None):
+
+	branches = gmPraxis.get_praxis_branches()
+
+	if len(branches) == 0:
+		if not set_active_praxis_branch(parent = parent, no_parent = False):
+			return None
+
+	# FIXME: needs implementation
+
+#============================================================
+def set_active_praxis_branch(parent=None, no_parent=False):
+
+	if no_parent:
+		parent = None
+	else:
+		if parent is None:
+			parent = wx.GetApp().GetTopWindow()
+
+	branches = gmPraxis.get_praxis_branches()
+
+	if len(branches) == 1:
+		_log.debug('only one praxis branch configured')
+		gmPraxis.gmCurrentPraxisBranch(branches[0])
+		_log.debug('activated branch')
+		return True
+
+	if len(branches) == 0:
+		orgs = gmOrganization.get_orgs()
+		if len(orgs) == 0:
+			pk_cat = gmOrganization.create_org_category(category = 'Praxis')
+			org = gmOrganization.create_org(_('Your praxis'), pk_cat)
+			unit = org.add_unit(_('Your branch'))
+			branch = gmPraxis.create_praxis_branch(pk_org_unit = unit['pk_org_unit'])
+			_log.debug('auto-created praxis branch because no organizations existed: %s', branch)
+			gmPraxis.gmCurrentPraxisBranch(branch)
+			gmGuiHelpers.gm_show_info (
+				title = _('Praxis configuration ...'),
+				info = _(
+					'GNUmed has auto-created the following\n'
+					'praxis branch for you (which you can\n'
+					'later configure as needed):\n'
+					'\n'
+					'%s'
+				) % branch.format()
+			)
+			return True
+
+		if len(orgs) == 1:
+			units = orgs[0].units
+			if len(units) == 1:
+				branch = gmPraxis.create_praxis_branch(pk_org_unit = units[0]['pk_org_unit'])
+				_log.debug('auto-selected praxis branch because only one organization with only one unit existed: %s', branch)
+				gmPraxis.gmCurrentPraxisBranch(branch)
+				gmGuiHelpers.gm_show_info (
+					title = _('Praxis configuration ...'),
+					info = _(
+						'GNUmed has auto-selected the following\n'
+						'praxis branch for you (which you can\n'
+						'later configure as needed):\n'
+						'\n'
+						'%s'
+					) % branch.format()
+				)
+				return True
+
+		_log.debug('no praxis branches configured, selecting from organization units')
+		msg = _(
+				'No praxis branches configured currently.\n'
+				'\n'
+				'You MUST select one unit of an organization to be the initial\n'
+				'branch (site, office) which you are logging in from.'
+		)
+		unit = gmOrganizationWidgets.select_org_unit(msg = msg, no_parent = True)
+		if unit is None:
+			_log.warning('no organization unit selected, aborting')
+			return False
+		_log.debug('org unit selected as praxis branch: %s', unit)
+		branch = gmPraxis.create_praxis_branch(pk_org_unit = unit['pk_org_unit'])
+		_log.debug('created praxis branch: %s', branch)
+		gmPraxis.gmCurrentPraxisBranch(branch)
+		return True
+
+	#--------------------
+	def refresh(lctrl):
+		branches = gmPraxis.get_praxis_branches()
+		items = [
+			[	b['branch'],
+				gmTools.coalesce(b['l10n_unit_category'], '')
+			] for b in branches
+		]
+		lctrl.set_string_items(items = items)
+		lctrl.set_data(data = branches)
+	#--------------------
+	branch = gmListWidgets.get_choices_from_list (
+		parent = parent,
+		msg = _("Select the branch of praxis [%s] which you are logging in from.\n") % branches[0]['praxis'],
+		caption = _('Praxis branch selection ...'),
+		columns = [_('Branch'), _('Branch type')],
+		can_return_empty = False,
+		single_selection = True,
+		refresh_callback = refresh
+	)
+	if branch is None:
+		_log.warning('no praxis branch selected, aborting')
+		return False
+	gmPraxis.gmCurrentPraxisBranch(branch)
+	return True
+
+#============================================================
+def manage_praxis_branches(parent=None):
+
+	if parent is None:
+		parent = wx.GetApp().GetTopWindow()
+
+	#---------------------------
+	def get_unit_tooltip(unit):
+		if unit is None:
+			return None
+		return '\n'.join(unit.format(with_address = True, with_org = True, with_comms = True))
+	#---------------------------
+	def manage_orgs():
+		gmOrganizationWidgets.manage_orgs(parent = parent)
+	#---------------------------
+
+	branches = gmPraxis.get_praxis_branches()
+	org = branches[0].organization
+	praxis = branches[0]['praxis']
+
+	msg = _(
+		'Pick those units of "%s" which are branches of your praxis !\n'
+		'\n'
+		'Note that no other client should be connected at this time.\n'
+		'\n'
+		'If you want to select another organization entirely\n'
+		'first remove all existing branches.\n'
+	) % praxis
+
+	picker = gmListWidgets.cItemPickerDlg(parent, -1, msg = msg)
+	picker.extra_button = (
+		_('Manage units'),
+		_('Manage organizations and their units'),
+		manage_orgs
+	)
+	picker.left_item_tooltip_callback = get_unit_tooltip
+	picker.right_item_tooltip_callback = get_unit_tooltip
+	picker.set_columns(columns = [_('Units of "%s"') % praxis], columns_right = [_('Branches of your praxis')])
+	units = org.units
+	branch_unit_pks = [b['pk_org_unit'] for b in branches]
+	branch_units = []
+	for unit in units:
+		if unit['pk_org_unit'] in branch_unit_pks:
+			branch_units.append(unit)
+	items = [ '%s%s' % (u['unit'], gmTools.coalesce(u['l10n_unit_category'], '', ' (%s)')) for u in units ]
+	picker.set_choices(choices = items, data = units)
+	items = [ '%s%s' % (u['unit'], gmTools.coalesce(u['l10n_unit_category'], '', ' (%s)')) for u in branch_units ]
+	picker.set_picks(picks = items, data = branch_units)
+	del units
+	del branch_unit_pks
+	del branch_units
+	del items
+
+	result = picker.ShowModal()
+
+	if result == wx.ID_CANCEL:
+		picker.DestroyLater()
+		return None
+
+	picks = picker.picks
+	picker.DestroyLater()
+
+	failed_delete_msg = _(
+		'Cannot delete praxis branch(es).\n'
+		'\n'
+		'There are probably clients logged in\n'
+		'from other locations. You need to log out\n'
+		'all but this client before the praxis can\n'
+		'be reconfigured.'
+	)
+
+	if len(picks) == 0:
+		if not gmPraxis.delete_praxis_branches():
+			gmGuiHelpers.gm_show_error (
+				error = failed_delete_msg,
+				title = _('Configuring praxis ...')
+			)
+			return False
+		while not set_active_praxis_branch(parent = parent):
+			pass
+		return
+
+	pk_picked_units = [p['pk_org_unit'] for p in picks]
+	pk_branches_to_keep = [
+		b['pk_praxis_branch'] for b in gmPraxis.get_praxis_branches()
+		if b['pk_org_unit'] in pk_picked_units
+	]
+	if len(pk_branches_to_keep) == 0:
+		if not gmPraxis.delete_praxis_branches():
+			gmGuiHelpers.gm_show_error (
+				error = failed_delete_msg,
+				title = _('Configuring praxis ...')
+			)
+			return False
+	else:
+		if not gmPraxis.delete_praxis_branches(except_pk_praxis_branches = pk_branches_to_keep):
+			gmGuiHelpers.gm_show_error (
+				error = failed_delete_msg,
+				title = _('Configuring praxis ...')
+			)
+			return False
+	gmPraxis.create_praxis_branches(pk_org_units = pk_picked_units)
+
+	# detect whether active branch in kept branches
+	if gmPraxis.gmCurrentPraxisBranch()['pk_praxis_branch'] in pk_branches_to_keep:
+		return
+
+	while not set_active_praxis_branch(parent = parent):
+		pass
+
+#============================================================
+class cPraxisBranchPhraseWheel(gmPhraseWheel.cPhraseWheel):
+
+	def __init__(self, *args, **kwargs):
+		query = """(
+			SELECT
+				pk_praxis_branch AS data,
+				branch || ' (' || praxis || ')' AS field_label,
+				branch || coalesce(' (' || l10n_unit_category || ')', '') || ' of ' || l10n_organization_category || ' "' || praxis || '"' AS list_label
+			FROM
+				dem.v_praxis_branches
+			WHERE
+				branch %(fragment_condition)s
+
+			)	UNION	(
+
+			SELECT
+				pk_praxis_branch AS data,
+				branch || ' (' || praxis || ')' AS field_label,
+				branch || coalesce(' (' || l10n_unit_category || ')', '') || ' of ' || l10n_organization_category || ' "' || praxis || '"' AS list_label
+			FROM
+				dem.v_praxis_branches
+			WHERE
+				praxis %(fragment_condition)s
+
+			)	UNION	(
+
+			SELECT
+				pk_praxis_branch AS data,
+				branch || ' (' || praxis || ')' AS field_label,
+				branch || coalesce(' (' || l10n_unit_category || ')', '') || ' of ' || l10n_organization_category || ' "' || praxis || '"' AS list_label
+			FROM
+				dem.v_praxis_branches
+			WHERE
+				l10n_unit_category %(fragment_condition)s
+
+			)
+		ORDER BY
+			list_label
+		LIMIT 50"""
+		mp = gmMatchProvider.cMatchProvider_SQL2(queries=query)
+		mp.setThresholds(1, 2, 4)
+		gmPhraseWheel.cPhraseWheel.__init__(self, *args, **kwargs)
+		self.SetToolTip(_("Select a praxis branch."))
+		self.matcher = mp
+		self.selection_only = True
+		self.picklist_delay = 300
+	#--------------------------------------------------------
+	def _get_data_tooltip(self):
+		if self.GetData() is None:
+			return None
+		branch = self._data2instance()
+		if branch is None:
+			return None
+		return branch.format()
+	#--------------------------------------------------------
+	def _data2instance(self):
+		if self.GetData() is None:
+			return None
+		return gmPraxis.cPraxisBranch(aPK_obj = self.GetData())
+
+#============================================================
+# main
+#------------------------------------------------------------
+if __name__ == "__main__":
 
 	if len(sys.argv) < 2:
 		sys.exit()
@@ -593,35 +681,15 @@ if __name__ == '__main__':
 	if sys.argv[1] != 'test':
 		sys.exit()
 
-	from Gnumed.pycommon import gmI18N
-	gmI18N.install_domain()
+#	from Gnumed.pycommon import gmPG2
+#	from Gnumed.pycommon import gmI18N
+#	gmI18N.activate_locale()
+#	gmI18N.install_domain()
 
-	def run_tests():
-		prac = gmCurrentPraxisBranch()
-#		print "help desk:", prac.helpdesk
-#		print "active workplace:", prac.active_workplace
+	def test_configure_wp_plugins():
+		app = wx.PyWidgetTester(size = (400, 300))
+		configure_workplace_plugins()
 
-		old_banner = prac.db_logon_banner
-		test_banner = 'a test banner'
-		prac.db_logon_banner = test_banner
-		if prac.db_logon_banner != test_banner:
-			print(('Cannot set logon banner to', test_banner))
-			return False
-		prac.db_logon_banner = ''
-		if prac.db_logon_banner != '':
-			print('Cannot set logon banner to ""')
-			return False
-		prac.db_logon_banner = old_banner
-
-		return True
-
-#	if not run_tests():
-#		print "regression tests failed"
-#	print "regression tests succeeded"
-
-	for b in get_praxis_branches():
-		print((b.format()))
-		#print(b.vcf)
-		print(b.scan2pay_data)
-
-#============================================================
+	#--------------------------------------------------------
+	#test_org_unit_prw()
+	#test_configure_wp_plugins()

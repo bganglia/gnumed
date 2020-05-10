@@ -50,11 +50,11 @@ except ImportError:
 # do this check just in case, so we can make sure
 # py2exe and friends include the proper version, too
 version = int('%s%s' % (wx.MAJOR_VERSION, wx.MINOR_VERSION))
-if (version < 28) or ('unicode' not in wx.PlatformInfo):
+if (version < 40) or ('unicode' not in wx.PlatformInfo):
 	print('GNUmed startup: Unsupported wxPython version (%s: %s).' % (wx.VERSION_STRING, wx.PlatformInfo))
-	print('GNUmed startup: wxPython 2.8+ with unicode support is required.')
+	print('GNUmed startup: wxPython 4.0+ with unicode support is required.')
 	print('CRITICAL ERROR: Proper wxPython version not found. Halted.')
-	raise ValueError('wxPython 2.8+ with unicode support not found')
+	raise ValueError('wxPython 4.0+ with unicode support not found')
 
 
 # more GNUmed libs
@@ -2351,7 +2351,7 @@ class gmTopLevelFrame(wx.Frame):
 	# Help / Debugging
 	#----------------------------------------------
 	def __on_save_screenshot(self, evt):
-		title = gmTools.undecorate_window_title(self.Title.rstrip())
+		title = gmGuiHelpers.undecorate_window_title(self.Title.rstrip())
 		png_fname = os.path.join (
 			gmTools.gmPaths().home_dir,
 			'gnumed',
@@ -3667,7 +3667,10 @@ class gmApp(wx.App):
 	def __verify_praxis_branch(self):
 
 		if not gmPraxisWidgets.set_active_praxis_branch(no_parent = True):
+			_log.debug('failed to activate branch')
 			return False
+
+		_log.debug('activated branch')
 
 		creds = gmConnectionPool.gmConnectionPool().credentials
 		msg = '\n'
@@ -3677,6 +3680,8 @@ class gmApp(wx.App):
 		)
 		msg += '\n\n'
 
+		_log.debug('getting branch')
+
 		praxis = gmPraxis.gmCurrentPraxisBranch()
 		msg += _('Branch "%s" of praxis "%s"\n') % (
 			praxis['branch'],
@@ -3684,8 +3689,11 @@ class gmApp(wx.App):
 		)
 		msg += '\n\n'
 
+		_log.debug('getting banner')
+
 		banner = praxis.db_logon_banner
 		if banner.strip() == '':
+			_log.debug('no banner')
 			return True
 		msg += banner
 		msg += '\n\n'
@@ -3700,10 +3708,19 @@ class gmApp(wx.App):
 				{'label': _('Disconnect'), 'tooltip': _('No, do not connect to this database.'), 'default': False}
 			]
 		)
+
+		_log.debug('showing banner')
+
 		log_on = dlg.ShowModal()
+
+		_log.debug('scheduling dlg destruction')
+
 		dlg.DestroyLater()
+
 		if log_on == wx.ID_YES:
+			_log.debug('returning for logon')
 			return True
+
 		_log.info('user decided to not connect to this database')
 		return False
 
